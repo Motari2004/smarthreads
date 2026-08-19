@@ -60,7 +60,7 @@ else:
     print("⚠️  No GEMINI_API_KEYS set. Set GEMINI_API_KEYS in environment variables.")
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-3.1-flash-lite"  # Use a valid model
 _gemini_key_index = 0
 
 sessions = {}  # in-memory session cache
