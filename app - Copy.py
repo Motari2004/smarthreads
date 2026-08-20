@@ -26,24 +26,8 @@ import threading
 from PIL import Image
 from io import BytesIO
 from dotenv import load_dotenv
-import sys
 
-# Load .env only if not in Vercel
-if not os.environ.get('VERCEL'):
-    load_dotenv()
-
-
-
-
-# ============================================================
-# SESSION STORAGE
-# ============================================================
-
-sessions = {}  # in-memory session cache
-
-
-
-
+load_dotenv()
 
 app = Flask(__name__, static_folder='static')
 CORS(app)
@@ -57,233 +41,38 @@ DATABASE_URL = os.environ.get(
     'postgresql://neondb_owner:npg_s1mQPc4CLlGM@ep-green-breeze-ayvcdczd-pooler.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
 )
 
-ZERNIO_API_KEY = os.environ.get('ZERNIO_API_KEY', '')
+ZERNIO_API_KEY = os.environ.get('ZERNIO_API_KEY')
 ZERNIO_BASE_URL = "https://zernio.com/api/v1"
 SCHEDULE_TIMEZONE = "Africa/Nairobi"
 TIMEZONE = "Africa/Nairobi"
 LOCAL_TIMEZONE = pytz.timezone(TIMEZONE)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ============================================================
-# GEMINI CONFIG - Models with fallback
-# ============================================================
-
-# Google Gemini API — Load from environment variables only
+# Google Gemini API — multiple keys, round-robin
+_default_keys = [
+    'AIzaSyA8sl69BtJCaY0au042Pr2HUPcSwXYss-U',
+    'AIzaSyB-FosQIBYp4FhUJBy3cuLzmHeKCJpPj7I',
+    'AIzaSyCjk1Fy_aPXH7ryP_VuA-sdtj4jn_M3pJQ',
+]
 _env_keys = os.environ.get('GEMINI_API_KEYS', '') or os.environ.get('GEMINI_API_KEY', '')
 if _env_keys:
     GEMINI_API_KEYS = [k.strip() for k in _env_keys.split(',') if k.strip()]
-    print(f"✅ Loaded {len(GEMINI_API_KEYS)} Gemini keys from environment")
 else:
-    GEMINI_API_KEYS = []
-    print("⚠️  No GEMINI_API_KEYS environment variable set!")
-
-GEMINI_MODELS = [
-    "gemini-3.5-flash-lite",   
-    "gemini-2.5-flash-lite",   
-    "gemini-3.6-flash",    
-    "gemini-3.7-flash",        
-    
-]
-
+    GEMINI_API_KEYS = [k for k in _default_keys if k]
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
-
-# ============================================================
-# GEMINI STATE VARIABLES
-# ============================================================
-
-_gemini_model_index = 0
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 _gemini_key_index = 0
-_gemini_key_cooldown = {}
-_gemini_model_cooldown = {}
 
-# ============================================================
-# GEMINI HELPER FUNCTIONS
-# ============================================================
+sessions = {}  # in-memory session cache
+
 
 def next_gemini_key():
-    """Get next available Gemini API key (skip cooldown keys)"""
     global _gemini_key_index
     if not GEMINI_API_KEYS:
         return None
-    
-    # Try to find a working key
-    for _ in range(len(GEMINI_API_KEYS) * 2):
-        key_index = _gemini_key_index % len(GEMINI_API_KEYS)
-        key = GEMINI_API_KEYS[key_index]
-        
-        # Check if key is on cooldown
-        if key in _gemini_key_cooldown:
-            cooldown_until = _gemini_key_cooldown[key]
-            if datetime.now() < cooldown_until:
-                _gemini_key_index += 1
-                continue
-        
-        _gemini_key_index += 1
-        return key
-    
-    # All keys on cooldown
-    print("⚠️ All API keys on cooldown")
-    return GEMINI_API_KEYS[0] if GEMINI_API_KEYS else None
-
-def next_gemini_model():
-    """Get next model in round-robin fashion"""
-    global _gemini_model_index
-    if not GEMINI_MODELS:
-        return "gemini-2.5-flash-lite"
-    
-    model = GEMINI_MODELS[_gemini_model_index % len(GEMINI_MODELS)]
-    _gemini_model_index += 1
-    return model
-
-def handle_model_rate_limit(model):
-    """Put a model on cooldown if it's rate-limited"""
-    _gemini_model_cooldown[model] = datetime.now() + timedelta(seconds=60)
-    print(f"⏳ Model {model} on cooldown for 60 seconds")
-
-
-
-
-
-
-
-
-
-
-
-
-def call_gemini(messages, tools=None, model=None):
-    """Call Gemini API with automatic model fallback on errors"""
-    
-    # If no model specified, get next model
-    if model is None:
-        model = next_gemini_model()
-    
-    # Check if model is on cooldown
-    if model in _gemini_model_cooldown:
-        cooldown_until = _gemini_model_cooldown[model]
-        if datetime.now() < cooldown_until:
-            print(f"⏳ Model {model} on cooldown, trying next model...")
-            next_model = next_gemini_model()
-            if next_model != model:
-                return call_gemini(messages, tools, next_model)
-            return None, f"All models on cooldown"
-    
-    # Get API key
-    key = next_gemini_key()
-    if not key:
-        return None, "No Gemini API keys. Set GEMINI_API_KEYS in environment."
-    
-    print(f"🔑 Using Gemini key: {key[:12]}... with model: {model}")
-    
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": model,
-        "messages": messages,
-    }
-    if tools:
-        payload["tools"] = tools
-        payload["tool_choice"] = "auto"
-    
-    try:
-        r = requests.post(
-            f"{GEMINI_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
-        print(f"📥 Gemini response status: {r.status_code} (model: {model})")
-        
-        # Handle 403 - API key leaked/invalid - try next key
-        if r.status_code == 403:
-            print(f"❌ API key is invalid or leaked! Status: 403")
-            # Put the key on cooldown for 5 minutes
-            if key in _gemini_key_cooldown:
-                _gemini_key_cooldown[key] = datetime.now() + timedelta(seconds=300)
-            else:
-                _gemini_key_cooldown[key] = datetime.now() + timedelta(seconds=300)
-            print(f"⏳ Key {key[:12]}... on cooldown for 5 minutes")
-            
-            # Try next key
-            next_key = next_gemini_key()
-            if next_key and next_key != key:
-                print(f"🔄 Switching to next API key")
-                return call_gemini(messages, tools, model)
-            return None, f"All API keys invalid or on cooldown - please check your GEMINI_API_KEYS"
-        
-        # Handle rate limit - try next model
-        if r.status_code == 429:
-            print(f"⚠️ Rate limit hit for model {model}")
-            handle_model_rate_limit(model)
-            
-            # Try next model
-            next_model = next_gemini_model()
-            if next_model != model:
-                print(f"🔄 Switching to next model: {next_model}")
-                return call_gemini(messages, tools, next_model)
-            return None, f"Rate limit exceeded - all models exhausted"
-        
-        # Handle other errors - try next model
-        if r.status_code != 200:
-            print(f"❌ Gemini error with model {model}: {r.text[:200]}")
-            
-            # Try next model for non-200 errors (except 400 which is usually bad request)
-            if r.status_code != 400 and r.status_code != 403:
-                next_model = next_gemini_model()
-                if next_model != model:
-                    print(f"🔄 Switching to next model: {next_model}")
-                    return call_gemini(messages, tools, next_model)
-            
-            return None, f"Gemini {r.status_code} with {model}: {r.text[:300]}"
-        
-        # Success! Reset model cooldown
-        if model in _gemini_model_cooldown:
-            del _gemini_model_cooldown[model]
-        
-        return r.json(), None
-        
-    except Exception as e:
-        print(f"❌ Gemini exception with {model}: {e}")
-        # Try next model on exception
-        next_model = next_gemini_model()
-        if next_model != model:
-            print(f"🔄 Switching to next model on exception: {next_model}")
-            return call_gemini(messages, tools, next_model)
-        return None, str(e)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    key = GEMINI_API_KEYS[_gemini_key_index % len(GEMINI_API_KEYS)]
+    _gemini_key_index += 1
+    return key
 
 
 def get_now():
@@ -362,12 +151,10 @@ def _detect_accounts_for_key(api_key, label="key"):
 
 
 def get_zernio_api_keys():
-    """Get Zernio API keys from environment variables only (no hardcoding)."""
     load_dotenv(override=False)
     keys = []
     seen = set()
 
-    # Check for numbered keys: ZERNIO_API_KEY1, ZERNIO_API_KEY2, etc.
     i = 1
     while True:
         key = (os.environ.get(f'ZERNIO_API_KEY{i}') or '').strip()
@@ -386,7 +173,6 @@ def get_zernio_api_keys():
             seen.add(key)
         i += 1
 
-    # Check for comma-separated keys
     csv = (os.environ.get('ZERNIO_API_KEYS') or '').strip()
     if csv:
         for part in csv.split(','):
@@ -404,7 +190,6 @@ def get_zernio_api_keys():
             })
             seen.add(key)
 
-    # Single key fallback
     if not keys:
         default_key = (os.environ.get('ZERNIO_API_KEY') or '').strip()
         if default_key:
@@ -436,12 +221,12 @@ def ensure_zernio_keys_loaded(for_auto: bool = False) -> dict:
         previews.append(f"{k.get('env_var', k.get('index'))}: {prev} ({acc})")
 
     if keys:
-        msg = f"Loaded {len(keys)} Zernio API key(s) from environment"
+        msg = f"Loaded {len(keys)} Zernio API key(s) from .env"
         print(f"🔑 {msg}")
         for line in previews:
             print(f"   • {line}")
     else:
-        msg = "No Zernio API keys found. Set ZERNIO_API_KEY / ZERNIO_API_KEY1 / ZERNIO_API_KEYS in environment variables."
+        msg = "No Zernio API keys found in .env. Set ZERNIO_API_KEY / ZERNIO_API_KEY1 / ZERNIO_API_KEYS."
         if for_auto:
             msg = "⚠️ Auto pilot cannot post: " + msg
         print(f"⚠️ {msg}")
@@ -1541,229 +1326,7 @@ def tool_list_vault(limit=20, offset=0):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
--# ============================================================
-# VAULT MANAGEMENT WITH POST STATUS - ADD THIS AFTER tool_list_vault
-# ============================================================
 
-def tool_list_vault_by_status(status=None, limit=50, offset=0):
-    """List vault items filtered by post status."""
-    conn = get_db_connection()
-    if not conn:
-        return {"success": False, "error": "DB unavailable"}
-    try:
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        
-        if status == 'unposted':
-            cur.execute("""
-                SELECT v.id, v.uri, v.author, v.display_name, v.text, v.images, v.video, 
-                       v.likes, v.reposts, v.replies, v.created_at, v.saved_at, 
-                       v.handler_handle, v.notes,
-                       NULL as post_status, NULL as posted_at, NULL as platform_post_id
-                FROM vault v
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM posted_posts p 
-                    WHERE p.uri = v.uri AND p.status IN ('completed', 'posted')
-                )
-                ORDER BY v.saved_at DESC
-                LIMIT %s OFFSET %s
-            """, (limit, offset))
-        elif status in ('posted', 'completed'):
-            cur.execute("""
-                SELECT v.id, v.uri, v.author, v.display_name, v.text, v.images, v.video, 
-                       v.likes, v.reposts, v.replies, v.created_at, v.saved_at, 
-                       v.handler_handle, v.notes,
-                       p.status as post_status, p.posted_at, p.platform_post_id
-                FROM vault v
-                INNER JOIN posted_posts p ON p.uri = v.uri
-                WHERE p.status IN ('completed', 'posted')
-                ORDER BY p.posted_at DESC
-                LIMIT %s OFFSET %s
-            """, (limit, offset))
-        elif status == 'scheduled':
-            cur.execute("""
-                SELECT v.id, v.uri, v.author, v.display_name, v.text, v.images, v.video, 
-                       v.likes, v.reposts, v.replies, v.created_at, v.saved_at, 
-                       v.handler_handle, v.notes,
-                       p.status as post_status, p.posted_at, p.platform_post_id
-                FROM vault v
-                INNER JOIN posted_posts p ON p.uri = v.uri
-                WHERE p.status = 'scheduled'
-                ORDER BY p.posted_at DESC
-                LIMIT %s OFFSET %s
-            """, (limit, offset))
-        else:
-            cur.execute("""
-                SELECT v.id, v.uri, v.author, v.display_name, v.text, v.images, v.video, 
-                       v.likes, v.reposts, v.replies, v.created_at, v.saved_at, 
-                       v.handler_handle, v.notes,
-                       COALESCE(p.status, 'unposted') as post_status, 
-                       p.posted_at, p.platform_post_id
-                FROM vault v
-                LEFT JOIN posted_posts p ON p.uri = v.uri
-                ORDER BY v.saved_at DESC
-                LIMIT %s OFFSET %s
-            """, (limit, offset))
-        
-        rows = cur.fetchall()
-        
-        if status == 'unposted':
-            cur.execute("""
-                SELECT COUNT(*) FROM vault v
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM posted_posts p 
-                    WHERE p.uri = v.uri AND p.status IN ('completed', 'posted')
-                )
-            """)
-        elif status in ('posted', 'completed'):
-            cur.execute("""
-                SELECT COUNT(*) FROM vault v
-                INNER JOIN posted_posts p ON p.uri = v.uri
-                WHERE p.status IN ('completed', 'posted')
-            """)
-        elif status == 'scheduled':
-            cur.execute("""
-                SELECT COUNT(*) FROM vault v
-                INNER JOIN posted_posts p ON p.uri = v.uri
-                WHERE p.status = 'scheduled'
-            """)
-        else:
-            cur.execute("SELECT COUNT(*) FROM vault")
-        
-        total = cur.fetchone()['count']
-        cur.close()
-        conn.close()
-        
-        vault = []
-        for r in rows:
-            vault.append({
-                "id": r['id'],
-                "uri": r['uri'],
-                "author": r['author'],
-                "display_name": r['display_name'],
-                "text": r['text'],
-                "images": r['images'] or [],
-                "video": r['video'],
-                "likes": r['likes'],
-                "reposts": r['reposts'],
-                "replies": r['replies'],
-                "created_at": r['created_at'].isoformat() if r['created_at'] else None,
-                "saved_at": r['saved_at'].isoformat() if r['saved_at'] else None,
-                "handler_handle": r['handler_handle'],
-                "notes": r['notes'],
-                "post_status": r.get('post_status') or 'unposted',
-                "posted_at": r['posted_at'].isoformat() if r.get('posted_at') else None,
-                "platform_post_id": r.get('platform_post_id'),
-            })
-        return {"success": True, "vault": vault, "count": total, "status_filter": status or 'all'}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-def tool_delete_vault_items(ids=None, status=None, all=False):
-    """Delete vault items by ID, by status, or all."""
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return {"success": False, "error": "Database unavailable"}
-        
-        cur = conn.cursor()
-        deleted_count = 0
-        deleted_uris = []
-        
-        if ids and isinstance(ids, list):
-            placeholders = ','.join(['%s'] * len(ids))
-            cur.execute(f"SELECT id, uri FROM vault WHERE id IN ({placeholders})", ids)
-            items = cur.fetchall()
-        elif status == 'unposted':
-            cur.execute("""
-                SELECT id, uri FROM vault v
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM posted_posts p 
-                    WHERE p.uri = v.uri AND p.status IN ('completed', 'posted')
-                )
-            """)
-            items = cur.fetchall()
-        elif status in ('posted', 'completed'):
-            cur.execute("""
-                SELECT v.id, v.uri FROM vault v
-                INNER JOIN posted_posts p ON p.uri = v.uri
-                WHERE p.status IN ('completed', 'posted')
-            """)
-            items = cur.fetchall()
-        elif status == 'scheduled':
-            cur.execute("""
-                SELECT v.id, v.uri FROM vault v
-                INNER JOIN posted_posts p ON p.uri = v.uri
-                WHERE p.status = 'scheduled'
-            """)
-            items = cur.fetchall()
-        elif all:
-            cur.execute("SELECT id, uri FROM vault")
-            items = cur.fetchall()
-        else:
-            return {"success": False, "error": "Specify ids, status, or all=True"}
-        
-        if not items:
-            cur.close()
-            conn.close()
-            return {"success": True, "deleted_count": 0, "message": "No items to delete"}
-        
-        for item in items:
-            item_id, uri = item
-            cur.execute("DELETE FROM posted_posts WHERE uri = %s", (uri,))
-            cur.execute("DELETE FROM vault WHERE id = %s", (item_id,))
-            deleted_count += 1
-            deleted_uris.append(uri)
-        
-        conn.commit()
-        cur.close()
-        conn.close()
-        
-        return {
-            "success": True,
-            "deleted_count": deleted_count,
-            "deleted_uris": deleted_uris,
-            "message": f"Deleted {deleted_count} item(s) from vault"
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-def tool_post_unposted(account_id=None, account_username=None, limit=10):
-    """Post all unposted vault items to Threads."""
-    result = tool_list_vault_by_status(status='unposted', limit=limit)
-    if not result.get('success'):
-        return result
-    
-    items = result.get('vault', [])
-    if not items:
-        return {"success": True, "posted_count": 0, "message": "No unposted items to post"}
-    
-    posted = 0
-    errors = []
-    results = []
-    
-    for item in items:
-        res = tool_post_now(
-            vault_id=item.get('id'),
-            account_id=account_id,
-            account_username=account_username
-        )
-        results.append(res)
-        if res.get('success'):
-            posted += 1
-        else:
-            errors.append(res.get('error', 'Unknown error'))
-        time.sleep(1.5)
-    
-    return {
-        "success": posted > 0,
-        "posted_count": posted,
-        "total": len(items),
-        "results": results,
-        "errors": errors,
-        "message": f"Posted {posted}/{len(items)} unposted items to Threads"
-    }
 def _get_vault_item(vault_id=None, uri=None):
     conn = get_db_connection()
     if not conn:
@@ -2302,7 +1865,7 @@ def run_auto_once(name='default'):
     if not key_status.get('success'):
         return {
             "success": False,
-            "error": key_status.get('message') or "No Zernio API keys in environment",
+            "error": key_status.get('message') or "No Zernio API keys in .env",
             "keys_checked": True,
         }
 
@@ -2523,6 +2086,38 @@ def tool_auto_remove(name):
         return {"success": False, "error": str(e)}
 
 
+# ============================================================
+# GEMINI + CHAT
+# ============================================================
+
+def call_gemini(messages, tools=None):
+    key = next_gemini_key()
+    if not key:
+        return None, "No Gemini API keys"
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": GEMINI_MODEL,
+        "messages": messages,
+    }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    try:
+        r = requests.post(
+            f"{GEMINI_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        if r.status_code != 200:
+            return None, f"Gemini {r.status_code}: {r.text[:300]}"
+        return r.json(), None
+    except Exception as e:
+        return None, str(e)
+
 
 TOOLS_SCHEMA = [
     {
@@ -2579,85 +2174,6 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "list_vault_by_status",
-            "description": "List vault items filtered by post status. Use 'unposted' for items not yet posted, 'posted' for already posted, 'scheduled' for scheduled, or 'all' for everything.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "enum": ["unposted", "posted", "scheduled", "all"],
-                        "description": "Filter by post status"
-                    },
-                    "limit": {"type": "integer", "default": 50}
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "delete_vault_items",
-            "description": "PERMANENTLY delete vault items by status or all. Use with caution! This cannot be undone. ALWAYS confirm with the user before deleting.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "enum": ["unposted", "posted", "scheduled", "all"],
-                        "description": "Delete items by status"
-                    },
-                    "ids": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                        "description": "List of vault IDs to delete"
-                    },
-                    "all": {
-                        "type": "boolean",
-                        "description": "Delete ALL vault items (requires confirmation: 'YES_DELETE_ALL')"
-                    }
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "post_unposted",
-            "description": "Post all unposted vault items to Threads immediately",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "account_username": {
-                        "type": "string",
-                        "description": "Threads account username to post to"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "default": 10,
-                        "description": "Max number of items to post"
-                    }
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "post_vault_batch",
-            "description": "Post multiple vault items to Threads now",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "count": {"type": "integer", "default": 3},
-                    "account_username": {"type": "string"}
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "post_now",
             "description": "Post a vault item to Threads now by vault_id or uri",
             "parameters": {
@@ -2692,14 +2208,6 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "list_scheduled",
             "description": "List scheduled Threads posts",
-            "parameters": {"type": "object", "properties": {}}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_api_keys",
-            "description": "List all configured Zernio API keys from .env",
             "parameters": {"type": "object", "properties": {}}
         }
     },
@@ -2759,20 +2267,6 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "auto_remove",
-            "description": "Remove/delete an auto pilot pipeline permanently",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"}
-                },
-                "required": ["name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "check_zernio_key",
             "description": "Validate a Zernio API key and list Threads accounts",
             "parameters": {
@@ -2784,34 +2278,12 @@ TOOLS_SCHEMA = [
     },
 ]
 
-TOOL_MAP = {
-    "login": tool_login,
-    "fetch_posts": tool_fetch_posts,
-    "add_to_vault": tool_add_to_vault,
-    "list_vault": tool_list_vault,
-    "list_vault_by_status": tool_list_vault_by_status,
-    "delete_vault_items": tool_delete_vault_items,
-    "post_unposted": tool_post_unposted,
-    "post_now": tool_post_now,
-    "post_vault_batch": tool_post_vault_batch,
-    "list_accounts": tool_list_accounts,
-    "get_status": tool_get_status,
-    "list_scheduled": tool_list_scheduled,
-    "list_api_keys": tool_list_api_keys,
-    "auto_setup": tool_auto_setup,
-    "auto_start": tool_auto_start,
-    "auto_stop": tool_auto_stop,
-    "auto_status": tool_auto_status,
-    "auto_run_now": tool_auto_run_now,
-    "auto_remove": tool_auto_remove,
-    "check_zernio_key": tool_check_zernio_key,
-}
+
 def execute_tool(name, args, session_id=None):
     args = args or {}
     try:
         if name == 'login':
             return tool_login(args.get('username'), args.get('password'))
-        
         if name == 'fetch_posts':
             if not session_id:
                 return {"success": False, "error": "Login first"}
@@ -2822,53 +2294,13 @@ def execute_tool(name, args, session_id=None):
                 media_only=bool(args.get('media_only', True)),
                 include_reposts=bool(args.get('include_reposts', False))
             )
-        
         if name == 'add_to_vault':
             posts = []
             if session_id and session_id in sessions:
                 posts = sessions[session_id].get('_last_fetched') or []
             return tool_add_to_vault(posts, handler_handle=sessions.get(session_id, {}).get('_last_actor'))
-        
         if name == 'list_vault':
             return tool_list_vault(limit=int(args.get('limit') or 15))
-        
-        # ===== NEW VAULT MANAGEMENT TOOLS =====
-        if name == 'list_vault_by_status':
-            return tool_list_vault_by_status(
-                status=args.get('status', 'all'),
-                limit=int(args.get('limit', 50))
-            )
-        
-        if name == 'delete_vault_items':
-            # Require confirmation for "delete all"
-            if args.get('all'):
-                confirm = args.get('confirm')
-                if confirm != 'YES_DELETE_ALL':
-                    return {
-                        "success": False, 
-                        "error": "Confirmation required",
-                        "message": "⚠️ This will permanently delete ALL vault items. Reply with 'YES_DELETE_ALL' to confirm."
-                    }
-            return tool_delete_vault_items(
-                ids=args.get('ids'),
-                status=args.get('status'),
-                all=args.get('all', False)
-            )
-        
-        if name == 'post_unposted':
-            return tool_post_unposted(
-                account_username=args.get('account_username'),
-                limit=int(args.get('limit', 10))
-            )
-        
-        if name == 'post_vault_batch':
-            return tool_post_vault_batch(
-                count=args.get('count', 3),
-                account_username=args.get('account_username'),
-                account_id=args.get('account_id')
-            )
-        # ===== END NEW TOOLS =====
-        
         if name == 'post_now':
             return tool_post_now(
                 vault_id=args.get('vault_id'),
@@ -2877,16 +2309,12 @@ def execute_tool(name, args, session_id=None):
                 account_username=args.get('account_username'),
                 account_id=args.get('account_id')
             )
-        
         if name == 'list_accounts':
             return tool_list_accounts('threads')
-        
         if name == 'get_status':
             return tool_get_status()
-        
         if name == 'list_scheduled':
             return tool_list_scheduled()
-        
         if name == 'auto_setup':
             return tool_auto_setup(
                 name=args.get('name') or 'default',
@@ -2896,28 +2324,18 @@ def execute_tool(name, args, session_id=None):
                 poll_interval_sec=args.get('poll_interval_sec') or 300,
                 max_posts_per_run=args.get('max_posts_per_run') or 2,
             )
-        
         if name == 'auto_start':
             return tool_auto_start()
-        
         if name == 'auto_stop':
             return tool_auto_stop()
-        
         if name == 'auto_status':
             return tool_auto_status()
-        
         if name == 'auto_run_now':
             return tool_auto_run_now(args.get('name') or 'default')
-        
-        if name == 'auto_remove':
-            return tool_auto_remove(args.get('name'))
-        
         if name == 'check_zernio_key':
             return tool_check_zernio_key(args.get('api_key'))
-        
         if name == 'list_api_keys':
             return tool_list_api_keys()
-        
         return {"success": False, "error": f"Unknown tool {name}"}
     except Exception as e:
         traceback.print_exc()
@@ -2925,52 +2343,6 @@ def execute_tool(name, args, session_id=None):
 
 
 SYSTEM_PROMPT = """You are the AI for Bluesky AI Vault → Threads.
-
-VAULT MANAGEMENT COMMANDS:
-- "list unposted" or "show unposted" → Call list_vault_by_status(status="unposted")
-- "list posted" or "show posted" → Call list_vault_by_status(status="posted")  
-- "list scheduled" or "show scheduled" → Call list_vault_by_status(status="scheduled")
-- "list all vault" or "show all vault" → Call list_vault_by_status(status="all")
-- "post unposted" → Call post_unposted()
-- "post count 5" → Call post_unposted(limit=5)
-- "delete unposted" → Call delete_vault_items(status="unposted")
-- "delete posted" → Call delete_vault_items(status="posted")
-- "delete scheduled" → Call delete_vault_items(status="scheduled")
-- "delete all vault" → Call delete_vault_items(all=True) (⚠️ Requires confirmation: "YES_DELETE_ALL")
-- "delete vault id 1,2,3" → Call delete_vault_items(ids=[1,2,3])
-- "post id 5" → Call post_now(vault_id=5)
-- "post 3 from vault" → Call post_vault_batch(count=3)
-
-===========================================
-CRITICAL - MULTIPLE ACCOUNTS FLOW:
-===========================================
-When the user wants to POST something (post_now, post_unposted, post_vault_batch):
-
-STEP 1: Check if the user specified an account:
-- "post id 5 to [account]" → use account_username="[account]"
-- "post unposted to [account]" → use account_username="[account]"
-
-STEP 2: If NO account was specified:
-- Call list_accounts() first to check how many accounts exist
-- If ONLY 1 account → use it automatically, mention: "Posting to [account_name]"
-- If MULTIPLE accounts → ASK the user: "You have [N] Threads accounts: [list names]. Which account would you like to post to?"
-
-STEP 3: Wait for the user's response before posting.
-
-ACCOUNT MANAGEMENT:
-- "list accounts" or "how many accounts" → Call list_accounts()
-- "which account" or "what accounts" → Call list_accounts()
-
-===========================================
-CRITICAL - When responding to vault questions:
-===========================================
-1. Call the appropriate tool first
-2. Use the tool result to respond with a friendly summary
-3. Show count, status, and list items with their IDs
-4. For deletion, ALWAYS confirm with the user first (especially for "delete all")
-5. When showing vault items, include their status icons:
-   ✅ = posted, ⏳ = scheduled, ⬜ = unposted
-6. For posting, always mention which account was used
 
 RULES:
 - Source platform: Bluesky (login, fetch posts).
@@ -2982,9 +2354,8 @@ You help the user:
 - Login to Bluesky
 - Fetch posts from Bluesky handles
 - Save them to a vault
-- Post vault items to Threads (ask which account if multiple)
+- Post vault items to Threads
 - Auto-pilot: watch a Bluesky account and cross-post new media to Threads
-- Manage vault: list by status, delete items, post unposted items
 
 Be concise. Timezone for schedules is Africa/Nairobi (GMT+3).
 """
@@ -3195,18 +2566,6 @@ def _sanitize_reply_threads_only(reply: str) -> str:
     return text
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 @app.route('/api/chat', methods=['POST'])
 def api_chat():
     data = request.json or {}
@@ -3218,14 +2577,8 @@ def api_chat():
     if not message:
         return jsonify({"success": False, "error": "Empty message"}), 400
 
-    print(f"\n{'='*50}")
-    print(f"📨 Message: {message[:50]}{'...' if len(message) > 50 else ''}")
-    print(f"🔑 Gemini keys available: {len(GEMINI_API_KEYS)}")
-    print(f"📊 History length: {len(history)}")
-
     # Keyword fallback first for reliability
     if not GEMINI_API_KEYS:
-        print("⚠️ No Gemini keys, using fallback")
         reply = simple_fallback(message, session_id)
         return jsonify({
             "success": True,
@@ -3245,14 +2598,10 @@ def api_chat():
             messages.append({"role": h['role'], "content": content})
     messages.append({"role": "user", "content": message})
 
-    print(f"📤 Calling Gemini with {len(messages)} messages")
-    
-    # Try with model fallback
     data_g, err = call_gemini(messages, tools=TOOLS_SCHEMA)
     tool_results = []
 
     if err or not data_g:
-        print(f"❌ All Gemini models failed: {err}")
         reply = simple_fallback(message, session_id)
         return jsonify({
             "success": True,
@@ -3262,67 +2611,48 @@ def api_chat():
             "session_id": session_id
         })
 
-    try:
-        choice = data_g['choices'][0]['message']
-        tool_calls = choice.get('tool_calls') or []
+    choice = data_g['choices'][0]['message']
+    tool_calls = choice.get('tool_calls') or []
 
-        if tool_calls:
-            print(f"🔧 Tool calls: {[tc.get('function', {}).get('name') for tc in tool_calls]}")
-            messages.append(choice)
-            for tc in tool_calls:
-                fn = tc.get('function') or {}
-                name = fn.get('name')
-                try:
-                    args = json.loads(fn.get('arguments') or '{}')
-                    print(f"   📌 {name}({args})")
-                except Exception:
-                    args = {}
-                result = execute_tool(name, args, session_id=session_id)
-                # Capture session from login
-                if result.get('session_id'):
-                    session_id = result['session_id']
-                # Stash fetches
-                if name == 'fetch_posts' and result.get('success') and session_id in sessions:
-                    sessions[session_id]['_last_fetched'] = result.get('posts') or []
-                    sessions[session_id]['_last_actor'] = result.get('actor')
-                tool_results.append({"name": name, "result": result})
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.get('id'),
-                    "content": json.dumps(result)
-                })
+    if tool_calls:
+        messages.append(choice)
+        for tc in tool_calls:
+            fn = tc.get('function') or {}
+            name = fn.get('name')
+            try:
+                args = json.loads(fn.get('arguments') or '{}')
+            except Exception:
+                args = {}
+            result = execute_tool(name, args, session_id=session_id)
+            # Capture session from login
+            if result.get('session_id'):
+                session_id = result['session_id']
+            # Stash fetches
+            if name == 'fetch_posts' and result.get('success') and session_id in sessions:
+                sessions[session_id]['_last_fetched'] = result.get('posts') or []
+                sessions[session_id]['_last_actor'] = result.get('actor')
+            tool_results.append({"name": name, "result": result})
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.get('id'),
+                "content": json.dumps(result)
+            })
 
-            # Final call with tool results - uses model fallback
-            final_data, final_err = call_gemini(messages)
-            if final_err or not final_data:
-                print(f"❌ Final Gemini failed: {final_err}")
-                reply = format_tool_summary(tool_results)
-            else:
-                reply = final_data['choices'][0]['message'].get('content') or format_tool_summary(tool_results)
-                print(f"📤 Gemini final reply: {reply[:50]}...")
+        final_data, final_err = call_gemini(messages)
+        if final_err or not final_data:
+            reply = format_tool_summary(tool_results)
         else:
-            reply = choice.get('content') or simple_fallback(message, session_id)
-            print(f"📤 Gemini direct reply: {reply[:50]}...")
+            reply = final_data['choices'][0]['message'].get('content') or format_tool_summary(tool_results)
+    else:
+        reply = choice.get('content') or simple_fallback(message, session_id)
 
-        print(f"{'='*50}\n")
-        return jsonify({
-            "success": True,
-            "reply": _sanitize_reply_threads_only(reply),
-            "tool_results": tool_results,
-            "chat_key": chat_key,
-            "session_id": session_id
-        })
-        
-    except Exception as e:
-        print(f"❌ Error processing Gemini response: {e}")
-        reply = simple_fallback(message, session_id)
-        return jsonify({
-            "success": True,
-            "reply": _sanitize_reply_threads_only(reply),
-            "tool_results": tool_results,
-            "chat_key": chat_key,
-            "session_id": session_id
-        })
+    return jsonify({
+        "success": True,
+        "reply": _sanitize_reply_threads_only(reply),
+        "tool_results": tool_results,
+        "chat_key": chat_key,
+        "session_id": session_id
+    })
 
 
 # ============================================================
@@ -3518,13 +2848,6 @@ def index():
     return send_from_directory('static', 'index.html')
 
 
-# ============================================================
-# VERCEL ENTRY POINT
-# ============================================================
-
-# For Vercel, we need to expose the app as 'app'
-# Vercel will look for 'app' or 'application' by default
-# If running locally with python app.py, this runs the development server
 if __name__ == '__main__':
     print("🚀 Bluesky AI Vault → Threads starting...")
     if GEMINI_API_KEYS:
@@ -3534,7 +2857,7 @@ if __name__ == '__main__':
 
     zernio_status = ensure_zernio_keys_loaded()
     if not zernio_status.get('success'):
-        print("⚠️  Threads posting will fail until ZERNIO_API_KEY is set in environment")
+        print("⚠️  Threads posting will fail until ZERNIO_API_KEY is set in .env")
     else:
         try:
             synced = refresh_all_zernio_accounts()
@@ -3557,7 +2880,3 @@ if __name__ == '__main__':
 
     port = int(os.environ.get('PORT', 10000))
     app.run(debug=False, host='0.0.0.0', port=port)
-    
-# For Vercel serverless deployment
-# The app object is what Vercel imports
-application = app
