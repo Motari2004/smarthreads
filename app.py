@@ -157,6 +157,17 @@ def handle_model_rate_limit(model):
     _gemini_model_cooldown[model] = datetime.now() + timedelta(seconds=60)
     print(f"⏳ Model {model} on cooldown for 60 seconds")
 
+
+
+
+
+
+
+
+
+
+
+
 def call_gemini(messages, tools=None, model=None):
     """Call Gemini API with automatic model fallback on errors"""
     
