@@ -2524,6 +2524,7 @@ def tool_auto_remove(name):
 
 
 
+
 TOOLS_SCHEMA = [
     {
         "type": "function",
@@ -2579,85 +2580,6 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "list_vault_by_status",
-            "description": "List vault items filtered by post status. Use 'unposted' for items not yet posted, 'posted' for already posted, 'scheduled' for scheduled, or 'all' for everything.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "enum": ["unposted", "posted", "scheduled", "all"],
-                        "description": "Filter by post status"
-                    },
-                    "limit": {"type": "integer", "default": 50}
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "delete_vault_items",
-            "description": "PERMANENTLY delete vault items by status or all. Use with caution! This cannot be undone. ALWAYS confirm with the user before deleting.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "enum": ["unposted", "posted", "scheduled", "all"],
-                        "description": "Delete items by status"
-                    },
-                    "ids": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                        "description": "List of vault IDs to delete"
-                    },
-                    "all": {
-                        "type": "boolean",
-                        "description": "Delete ALL vault items (requires confirmation: 'YES_DELETE_ALL')"
-                    }
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "post_unposted",
-            "description": "Post all unposted vault items to Threads immediately",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "account_username": {
-                        "type": "string",
-                        "description": "Threads account username to post to"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "default": 10,
-                        "description": "Max number of items to post"
-                    }
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "post_vault_batch",
-            "description": "Post multiple vault items to Threads now",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "count": {"type": "integer", "default": 3},
-                    "account_username": {"type": "string"}
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "post_now",
             "description": "Post a vault item to Threads now by vault_id or uri",
             "parameters": {
@@ -2692,14 +2614,6 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "list_scheduled",
             "description": "List scheduled Threads posts",
-            "parameters": {"type": "object", "properties": {}}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_api_keys",
-            "description": "List all configured Zernio API keys from .env",
             "parameters": {"type": "object", "properties": {}}
         }
     },
@@ -2759,20 +2673,6 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "auto_remove",
-            "description": "Remove/delete an auto pilot pipeline permanently",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"}
-                },
-                "required": ["name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "check_zernio_key",
             "description": "Validate a Zernio API key and list Threads accounts",
             "parameters": {
@@ -2784,28 +2684,7 @@ TOOLS_SCHEMA = [
     },
 ]
 
-TOOL_MAP = {
-    "login": tool_login,
-    "fetch_posts": tool_fetch_posts,
-    "add_to_vault": tool_add_to_vault,
-    "list_vault": tool_list_vault,
-    "list_vault_by_status": tool_list_vault_by_status,
-    "delete_vault_items": tool_delete_vault_items,
-    "post_unposted": tool_post_unposted,
-    "post_now": tool_post_now,
-    "post_vault_batch": tool_post_vault_batch,
-    "list_accounts": tool_list_accounts,
-    "get_status": tool_get_status,
-    "list_scheduled": tool_list_scheduled,
-    "list_api_keys": tool_list_api_keys,
-    "auto_setup": tool_auto_setup,
-    "auto_start": tool_auto_start,
-    "auto_stop": tool_auto_stop,
-    "auto_status": tool_auto_status,
-    "auto_run_now": tool_auto_run_now,
-    "auto_remove": tool_auto_remove,
-    "check_zernio_key": tool_check_zernio_key,
-}
+
 def execute_tool(name, args, session_id=None):
     args = args or {}
     try:
@@ -2871,52 +2750,6 @@ def execute_tool(name, args, session_id=None):
 
 SYSTEM_PROMPT = """You are the AI for Bluesky AI Vault → Threads.
 
-VAULT MANAGEMENT COMMANDS:
-- "list unposted" or "show unposted" → Call list_vault_by_status(status="unposted")
-- "list posted" or "show posted" → Call list_vault_by_status(status="posted")  
-- "list scheduled" or "show scheduled" → Call list_vault_by_status(status="scheduled")
-- "list all vault" or "show all vault" → Call list_vault_by_status(status="all")
-- "post unposted" → Call post_unposted()
-- "post count 5" → Call post_unposted(limit=5)
-- "delete unposted" → Call delete_vault_items(status="unposted")
-- "delete posted" → Call delete_vault_items(status="posted")
-- "delete scheduled" → Call delete_vault_items(status="scheduled")
-- "delete all vault" → Call delete_vault_items(all=True) (⚠️ Requires confirmation: "YES_DELETE_ALL")
-- "delete vault id 1,2,3" → Call delete_vault_items(ids=[1,2,3])
-- "post id 5" → Call post_now(vault_id=5)
-- "post 3 from vault" → Call post_vault_batch(count=3)
-
-===========================================
-CRITICAL - MULTIPLE ACCOUNTS FLOW:
-===========================================
-When the user wants to POST something (post_now, post_unposted, post_vault_batch):
-
-STEP 1: Check if the user specified an account:
-- "post id 5 to [account]" → use account_username="[account]"
-- "post unposted to [account]" → use account_username="[account]"
-
-STEP 2: If NO account was specified:
-- Call list_accounts() first to check how many accounts exist
-- If ONLY 1 account → use it automatically, mention: "Posting to [account_name]"
-- If MULTIPLE accounts → ASK the user: "You have [N] Threads accounts: [list names]. Which account would you like to post to?"
-
-STEP 3: Wait for the user's response before posting.
-
-ACCOUNT MANAGEMENT:
-- "list accounts" or "how many accounts" → Call list_accounts()
-- "which account" or "what accounts" → Call list_accounts()
-
-===========================================
-CRITICAL - When responding to vault questions:
-===========================================
-1. Call the appropriate tool first
-2. Use the tool result to respond with a friendly summary
-3. Show count, status, and list items with their IDs
-4. For deletion, ALWAYS confirm with the user first (especially for "delete all")
-5. When showing vault items, include their status icons:
-   ✅ = posted, ⏳ = scheduled, ⬜ = unposted
-6. For posting, always mention which account was used
-
 RULES:
 - Source platform: Bluesky (login, fetch posts).
 - Destination platform: Threads only (post, schedule, auto-pilot via Zernio).
@@ -2927,9 +2760,8 @@ You help the user:
 - Login to Bluesky
 - Fetch posts from Bluesky handles
 - Save them to a vault
-- Post vault items to Threads (ask which account if multiple)
+- Post vault items to Threads
 - Auto-pilot: watch a Bluesky account and cross-post new media to Threads
-- Manage vault: list by status, delete items, post unposted items
 
 Be concise. Timezone for schedules is Africa/Nairobi (GMT+3).
 """
