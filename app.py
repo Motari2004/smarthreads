@@ -1530,7 +1530,252 @@ def tool_list_vault(limit=20, offset=0):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+def tool_list_vault_by_status(status=None, limit=50, offset=0):
+    """List vault items filtered by post status."""
+    conn = get_db_connection()
+    if not conn:
+        return {"success": False, "error": "DB unavailable"}
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        if status == 'unposted':
+            cur.execute("""
+                SELECT v.id, v.uri, v.author, v.display_name, v.text, v.images, v.video, 
+                       v.likes, v.reposts, v.replies, v.created_at, v.saved_at, 
+                       v.handler_handle, v.notes,
+                       NULL as post_status, NULL as posted_at, NULL as platform_post_id
+                FROM vault v
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM posted_posts p 
+                    WHERE p.uri = v.uri AND p.status IN ('completed', 'posted') AND p.platform = 'threads'
+                )
+                ORDER BY v.saved_at DESC
+                LIMIT %s OFFSET %s
+            """, (limit, offset))
+        elif status in ('posted', 'completed'):
+            cur.execute("""
+                SELECT v.id, v.uri, v.author, v.display_name, v.text, v.images, v.video, 
+                       v.likes, v.reposts, v.replies, v.created_at, v.saved_at, 
+                       v.handler_handle, v.notes,
+                       p.status as post_status, p.posted_at, p.platform_post_id
+                FROM vault v
+                INNER JOIN posted_posts p ON p.uri = v.uri AND p.platform = 'threads'
+                WHERE p.status IN ('completed', 'posted')
+                ORDER BY p.posted_at DESC
+                LIMIT %s OFFSET %s
+            """, (limit, offset))
+        elif status == 'scheduled':
+            cur.execute("""
+                SELECT v.id, v.uri, v.author, v.display_name, v.text, v.images, v.video, 
+                       v.likes, v.reposts, v.replies, v.created_at, v.saved_at, 
+                       v.handler_handle, v.notes,
+                       p.status as post_status, p.posted_at, p.platform_post_id
+                FROM vault v
+                INNER JOIN posted_posts p ON p.uri = v.uri AND p.platform = 'threads'
+                WHERE p.status = 'scheduled'
+                ORDER BY p.posted_at DESC
+                LIMIT %s OFFSET %s
+            """, (limit, offset))
+        else:
+            cur.execute("""
+                SELECT v.id, v.uri, v.author, v.display_name, v.text, v.images, v.video, 
+                       v.likes, v.reposts, v.replies, v.created_at, v.saved_at, 
+                       v.handler_handle, v.notes,
+                       COALESCE(p.status, 'unposted') as post_status, 
+                       p.posted_at, p.platform_post_id
+                FROM vault v
+                LEFT JOIN posted_posts p ON p.uri = v.uri AND p.platform = 'threads'
+                ORDER BY v.saved_at DESC
+                LIMIT %s OFFSET %s
+            """, (limit, offset))
+        
+        rows = cur.fetchall()
+        
+        # Get total count for the filtered query
+        if status == 'unposted':
+            cur.execute("""
+                SELECT COUNT(*) FROM vault v
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM posted_posts p 
+                    WHERE p.uri = v.uri AND p.status IN ('completed', 'posted') AND p.platform = 'threads'
+                )
+            """)
+        elif status in ('posted', 'completed'):
+            cur.execute("""
+                SELECT COUNT(*) FROM vault v
+                INNER JOIN posted_posts p ON p.uri = v.uri AND p.platform = 'threads'
+                WHERE p.status IN ('completed', 'posted')
+            """)
+        elif status == 'scheduled':
+            cur.execute("""
+                SELECT COUNT(*) FROM vault v
+                INNER JOIN posted_posts p ON p.uri = v.uri AND p.platform = 'threads'
+                WHERE p.status = 'scheduled'
+            """)
+        else:
+            cur.execute("SELECT COUNT(*) FROM vault")
+        
+        total = cur.fetchone()['count']
+        cur.close()
+        conn.close()
+        
+        vault = []
+        for r in rows:
+            vault.append({
+                "id": r['id'],
+                "uri": r['uri'],
+                "author": r['author'],
+                "display_name": r['display_name'],
+                "text": r['text'],
+                "images": r['images'] or [],
+                "video": r['video'],
+                "likes": r['likes'],
+                "reposts": r['reposts'],
+                "replies": r['replies'],
+                "created_at": r['created_at'].isoformat() if r['created_at'] else None,
+                "saved_at": r['saved_at'].isoformat() if r['saved_at'] else None,
+                "handler_handle": r['handler_handle'],
+                "notes": r['notes'],
+                "post_status": r.get('post_status') or 'unposted',
+                "posted_at": r['posted_at'].isoformat() if r.get('posted_at') else None,
+                "platform_post_id": r.get('platform_post_id'),
+            })
+        return {"success": True, "vault": vault, "count": total, "status_filter": status or 'all'}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
+
+def tool_delete_vault_items(ids=None, status=None, all=False):
+    """Delete vault items by ID, by status, or all."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {"success": False, "error": "Database unavailable"}
+        
+        cur = conn.cursor()
+        deleted_count = 0
+        deleted_uris = []
+        
+        if ids and isinstance(ids, list):
+            placeholders = ','.join(['%s'] * len(ids))
+            cur.execute(f"SELECT id, uri FROM vault WHERE id IN ({placeholders})", ids)
+            items = cur.fetchall()
+        elif status == 'unposted':
+            cur.execute("""
+                SELECT id, uri FROM vault v
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM posted_posts p 
+                    WHERE p.uri = v.uri AND p.status IN ('completed', 'posted') AND p.platform = 'threads'
+                )
+            """)
+            items = cur.fetchall()
+        elif status in ('posted', 'completed'):
+            cur.execute("""
+                SELECT v.id, v.uri FROM vault v
+                INNER JOIN posted_posts p ON p.uri = v.uri AND p.platform = 'threads'
+                WHERE p.status IN ('completed', 'posted')
+            """)
+            items = cur.fetchall()
+        elif status == 'scheduled':
+            cur.execute("""
+                SELECT v.id, v.uri FROM vault v
+                INNER JOIN posted_posts p ON p.uri = v.uri AND p.platform = 'threads'
+                WHERE p.status = 'scheduled'
+            """)
+            items = cur.fetchall()
+        elif all:
+            cur.execute("SELECT id, uri FROM vault")
+            items = cur.fetchall()
+        else:
+            return {"success": False, "error": "Specify ids, status, or all=True"}
+        
+        if not items:
+            cur.close()
+            conn.close()
+            return {"success": True, "deleted_count": 0, "message": "No items to delete"}
+        
+        for item in items:
+            item_id, uri = item
+            cur.execute("DELETE FROM posted_posts WHERE uri = %s AND platform = 'threads'", (uri,))
+            cur.execute("DELETE FROM vault WHERE id = %s", (item_id,))
+            deleted_count += 1
+            deleted_uris.append(uri)
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {
+            "success": True,
+            "deleted_count": deleted_count,
+            "deleted_uris": deleted_uris,
+            "message": f"🗑️ Permanently deleted {deleted_count} item(s) from vault"
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def tool_post_unposted(account_id=None, account_username=None, limit=10):
+    """Post all unposted vault items to Threads."""
+    # Check accounts first
+    if not account_id and not account_username:
+        accounts_result = tool_list_accounts('threads')
+        accounts_list = accounts_result.get('accounts', [])
+        
+        if not accounts_list:
+            return {"success": False, "error": "No Threads accounts connected"}
+        
+        if len(accounts_list) == 1:
+            account_username = accounts_list[0].get('username')
+            account_id = accounts_list[0].get('account_id')
+        else:
+            account_names = [f"@{a.get('username') or a.get('display_name')}" for a in accounts_list]
+            return {
+                "success": False,
+                "needs_account": True,
+                "accounts": accounts_list,
+                "message": f"You have {len(accounts_list)} Threads accounts: {', '.join(account_names)}. Which one do you want to post to?",
+                "error": "Multiple accounts found - please choose one"
+            }
+    
+    result = tool_list_vault_by_status(status='unposted', limit=limit)
+    if not result.get('success'):
+        return result
+    
+    items = result.get('vault', [])
+    if not items:
+        return {"success": True, "posted_count": 0, "message": "No unposted items to post"}
+    
+    posted = 0
+    errors = []
+    results = []
+    
+    for item in items:
+        res = tool_post_now(
+            vault_id=item.get('id'),
+            account_id=account_id,
+            account_username=account_username
+        )
+        
+        # Check if the response needs account selection
+        if res.get('needs_account'):
+            return res  # Pass the account selection request back up
+        
+        results.append(res)
+        if res.get('success'):
+            posted += 1
+        else:
+            errors.append(res.get('error', 'Unknown error'))
+        time.sleep(1.5)
+    
+    return {
+        "success": posted > 0,
+        "posted_count": posted,
+        "total": len(items),
+        "results": results,
+        "errors": errors,
+        "message": f"Posted {posted}/{len(items)} unposted items to Threads (@{account_username or 'selected account'})"
+    }
 def _get_vault_item(vault_id=None, uri=None):
     conn = get_db_connection()
     if not conn:
@@ -1570,6 +1815,106 @@ def tool_post_now(uri=None, vault_id=None, caption=None, account_id=None, accoun
     if not item:
         return {"success": False, "error": "Vault item not found"}
 
+    # ============================================================
+    # STEP 1: CHECK IF ALREADY POSTED TO THREADS
+    # ============================================================
+    try:
+        conn = get_db_connection()
+        if conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id FROM posted_posts 
+                WHERE uri = %s AND platform = 'threads' AND status IN ('completed', 'posted')
+            """, (item.get('uri'),))
+            if cur.fetchone():
+                cur.close()
+                conn.close()
+                return {
+                    "success": False, 
+                    "error": "Already posted to Threads",
+                    "message": f"⚠️ This post (vault id={item.get('id')}) has already been posted to Threads."
+                }
+            cur.close()
+            conn.close()
+    except Exception as e:
+        print(f"check already posted error: {e}")
+
+    # ============================================================
+    # STEP 2: CHECK FOR MULTIPLE ACCOUNTS
+    # ============================================================
+    if not account_id and not account_username:
+        accounts_result = tool_list_accounts('threads')
+        accounts_list = accounts_result.get('accounts', [])
+        
+        if not accounts_list:
+            return {
+                "success": False,
+                "error": "No Threads accounts connected",
+                "needs_account": True,
+                "message": "No Threads accounts are connected. Please connect an account in Zernio first.",
+                "accounts": []
+            }
+        
+        if len(accounts_list) == 1:
+            # Auto-use the only account
+            account_username = accounts_list[0].get('username')
+            account_id = accounts_list[0].get('account_id')
+            print(f"✅ Auto-using the only Threads account: @{account_username}")
+        else:
+            # Multiple accounts - ask user to choose
+            account_names = []
+            for a in accounts_list:
+                name = a.get('username') or a.get('display_name') or a.get('account_id')
+                account_names.append(f"@{name}")
+            
+            return {
+                "success": False,
+                "needs_account": True,
+                "accounts": accounts_list,
+                "message": f"You have {len(accounts_list)} Threads accounts. Which one do you want to post to?\n\n" + 
+                           "\n".join([f"  • {name}" for name in account_names]),
+                "error": "Multiple accounts found - please choose one",
+                "_account_names": account_names,
+                "_account_list": accounts_list,
+                "vault_id": item.get('id'),
+                "uri": uri,
+                "caption": caption,
+                "content_type": content_type
+            }
+
+    # ============================================================
+    # STEP 3: RESOLVE ACCOUNT ID
+    # ============================================================
+    if account_id and not _looks_like_zernio_id(account_id):
+        if not account_username:
+            account_username = account_id
+        account_id = None
+    
+    if not account_id and account_username:
+        account_id = resolve_threads_account_id(account_id, account_username)
+    
+    if not account_id:
+        # Try to resolve by username with fuzzy matching
+        accounts_result = tool_list_accounts('threads')
+        accounts_list = accounts_result.get('accounts', [])
+        for acc in accounts_list:
+            if account_username and account_username.lower() in (acc.get('username') or '').lower():
+                account_id = acc.get('account_id')
+                account_username = acc.get('username')
+                break
+        
+        if not account_id:
+            return {
+                "success": False,
+                "error": f"Could not resolve account '{account_username}'.",
+                "message": f"I couldn't find Threads @{account_username}. Check connected accounts.",
+                "needs_account": True,
+                "accounts": accounts_list
+            }
+
+    # ============================================================
+    # STEP 4: GET IMAGE AND TEXT
+    # ============================================================
     images = item.get('images') or []
     image_url = None
     if images:
@@ -1581,7 +1926,9 @@ def tool_post_now(uri=None, vault_id=None, caption=None, account_id=None, accoun
 
     text = (caption if caption is not None and str(caption).strip() != '' else (item.get('text') or ''))[:500]
 
-    # Prefer re-upload via Zernio for reliability
+    # ============================================================
+    # STEP 5: UPLOAD IMAGE (if any)
+    # ============================================================
     image_bytes = None
     public_url = None
     if image_url and image_url.startswith(('http://', 'https://')):
@@ -1592,6 +1939,9 @@ def tool_post_now(uri=None, vault_id=None, caption=None, account_id=None, accoun
         else:
             public_url = image_url  # try direct URL
 
+    # ============================================================
+    # STEP 6: POST TO THREADS
+    # ============================================================
     if not public_url and not image_bytes:
         # Text-only Threads post
         result = post_to_threads(
@@ -1610,8 +1960,10 @@ def tool_post_now(uri=None, vault_id=None, caption=None, account_id=None, accoun
             scheduled_time=None
         )
 
+    # ============================================================
+    # STEP 7: RECORD POSTED
+    # ============================================================
     if result.get('success'):
-        # record posted
         try:
             conn = get_db_connection()
             if conn:
@@ -1627,15 +1979,22 @@ def tool_post_now(uri=None, vault_id=None, caption=None, account_id=None, accoun
                     item.get('id'),
                     item.get('uri'),
                     result.get('post_id'),
-                    Json({"account_id": result.get('account_id')})
+                    Json({
+                        "account_id": result.get('account_id'),
+                        "account_username": account_username
+                    })
                 ))
                 conn.commit()
                 cur.close()
                 conn.close()
         except Exception as e:
             print(f"posted_posts: {e}")
-        result['message'] = f"✅ Posted to Threads (vault id={item.get('id')})"
+        
+        account_display = f" (@{account_username})" if account_username else ""
+        result['message'] = f"✅ Posted to Threads{account_display} (vault id={item.get('id')})"
         result['vault_id'] = item.get('id')
+        result['account_username'] = account_username
+        result['caption'] = text
 
     return result
 
@@ -2311,17 +2670,32 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "fetch_posts",
-            "description": "Fetch posts from a Bluesky handle",
+            "name": "restore_session",
+            "description": "Restore a previously saved Bluesky session using only the handle.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "actor": {"type": "string"},
-                    "limit": {"type": "integer"},
-                    "media_only": {"type": "boolean"},
-                    "include_reposts": {"type": "boolean"}
+                    "handle": {"type": "string"}
                 },
-                "required": ["actor"]
+                "required": ["handle"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_posts",
+            "description": "Fetch recent posts from a Bluesky account. Prefer media_only=true for Threads-ready content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "actor": {"type": "string", "description": "Handle to fetch from"},
+                    "limit": {"type": "integer", "default": 20},
+                    "include_reposts": {"type": "boolean", "default": False},
+                    "media_only": {"type": "boolean", "default": True}
+                },
+                "required": ["session_id", "actor"]
             }
         }
     },
@@ -2329,18 +2703,112 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "add_to_vault",
-            "description": "Save recently fetched posts to vault",
-            "parameters": {"type": "object", "properties": {}}
+            "description": "Save the most recently fetched posts into the vault.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "posts": {"type": "array", "items": {"type": "object"}},
+                    "handler_handle": {"type": "string"}
+                }
+            }
         }
     },
     {
         "type": "function",
         "function": {
             "name": "list_vault",
-            "description": "List items in the vault",
+            "description": "Show posts currently stored in the vault.",
             "parameters": {
                 "type": "object",
-                "properties": {"limit": {"type": "integer"}}
+                "properties": {
+                    "limit": {"type": "integer", "default": 30},
+                    "handler_handle": {"type": "string"}
+                }
+            }
+        }
+    },
+    # ===== VAULT MANAGEMENT TOOLS =====
+    {
+        "type": "function",
+        "function": {
+            "name": "list_vault_by_status",
+            "description": "List vault items filtered by post status. Use 'unposted' for items not yet posted, 'posted' for already posted, 'scheduled' for scheduled, or 'all' for everything.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["unposted", "posted", "scheduled", "all"],
+                        "description": "Filter by post status"
+                    },
+                    "limit": {"type": "integer", "default": 50},
+                    "offset": {"type": "integer", "default": 0}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_vault_items",
+            "description": "PERMANENTLY delete vault items by status or all. Use with caution! This cannot be undone. ALWAYS confirm with the user before deleting.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["unposted", "posted", "scheduled", "all"],
+                        "description": "Delete items by status"
+                    },
+                    "ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "List of vault IDs to delete"
+                    },
+                    "all": {
+                        "type": "boolean",
+                        "description": "Delete ALL vault items (requires confirmation)"
+                    }
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "post_unposted",
+            "description": "Post all unposted vault items to Threads immediately",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account_username": {
+                        "type": "string",
+                        "description": "Threads account username to post to"
+                    },
+                    "account_id": {
+                        "type": "string",
+                        "description": "Threads account ID (optional)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "Max number of items to post"
+                    }
+                }
+            }
+        }
+    },
+    # ===== END VAULT MANAGEMENT TOOLS =====
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_from_vault",
+            "description": "Delete a post from the vault by its URI.",
+            "parameters": {
+                "type": "object",
+                "properties": {"uri": {"type": "string"}},
+                "required": ["uri"]
             }
         }
     },
@@ -2348,14 +2816,45 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "post_now",
-            "description": "Post a vault item to Threads now by vault_id or uri",
+            "description": "IMMEDIATELY post one vault item to Threads.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "vault_id": {"type": "integer"},
                     "uri": {"type": "string"},
                     "caption": {"type": "string"},
-                    "account_username": {"type": "string"}
+                    "account_username": {"type": "string"},
+                    "account_id": {"type": "string"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "post_vault_batch",
+            "description": "IMMEDIATELY post multiple vault items to Threads.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "count": {"type": "integer", "default": 3},
+                    "account_username": {"type": "string"},
+                    "account_id": {"type": "string"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_bulk",
+            "description": "Schedule multiple vault posts randomly across a time window.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "count": {"type": "integer"},
+                    "period": {"type": "string", "enum": ["24h", "week", "month"], "default": "week"},
+                    "account_id": {"type": "string"}
                 }
             }
         }
@@ -2364,7 +2863,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "list_accounts",
-            "description": "List connected Threads accounts",
+            "description": "List connected Threads accounts.",
             "parameters": {"type": "object", "properties": {}}
         }
     },
@@ -2372,7 +2871,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "get_status",
-            "description": "Get vault / posted / accounts status",
+            "description": "Get current counts: vault size, scheduled posts, posted posts, connected accounts.",
             "parameters": {"type": "object", "properties": {}}
         }
     },
@@ -2380,7 +2879,28 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "list_scheduled",
-            "description": "List scheduled Threads posts",
+            "description": "Show posts that are already scheduled to Threads.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_recent_posted",
+            "description": "Show what was recently posted to Threads.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 5}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "auto_status",
+            "description": "Check whether the autonomous poster is running and its last result.",
             "parameters": {"type": "object", "properties": {}}
         }
     },
@@ -2388,15 +2908,16 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "auto_setup",
-            "description": "Configure auto pipeline: watch Bluesky handle → post to Threads account",
+            "description": "Create or update ONE autonomous pipeline.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
                     "source_handle": {"type": "string"},
                     "account_username": {"type": "string"},
-                    "poll_interval_sec": {"type": "integer"},
-                    "max_posts_per_run": {"type": "integer"}
+                    "account_id": {"type": "string"},
+                    "poll_interval_sec": {"type": "integer", "default": 300},
+                    "max_posts_per_run": {"type": "integer", "default": 2}
                 },
                 "required": ["source_handle"]
             }
@@ -2406,7 +2927,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "auto_start",
-            "description": "Start auto pilot",
+            "description": "Enable and start autonomous pipelines.",
             "parameters": {"type": "object", "properties": {}}
         }
     },
@@ -2414,15 +2935,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "auto_stop",
-            "description": "Stop auto pilot",
-            "parameters": {"type": "object", "properties": {}}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "auto_status",
-            "description": "Auto pilot status",
+            "description": "Stop autonomous pipelines.",
             "parameters": {"type": "object", "properties": {}}
         }
     },
@@ -2430,25 +2943,67 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "auto_run_now",
-            "description": "Run one auto cycle immediately",
+            "description": "Run autonomous cycle(s) immediately.",
             "parameters": {
                 "type": "object",
-                "properties": {"name": {"type": "string"}}
+                "properties": {
+                    "name": {"type": "string"}
+                }
             }
         }
     },
     {
         "type": "function",
         "function": {
-            "name": "check_zernio_key",
-            "description": "Validate a Zernio API key and list Threads accounts",
+            "name": "auto_remove",
+            "description": "PERMANENTLY DELETE a pipeline by name.",
             "parameters": {
                 "type": "object",
-                "properties": {"api_key": {"type": "string"}},
+                "properties": {
+                    "name": {"type": "string"}
+                },
+                "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_api_keys",
+            "description": "List all configured Zernio API keys from environment variables.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_zernio_key",
+            "description": "Validate a Zernio API key and list Threads accounts on it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string"},
+                    "save_to_db": {"type": "boolean", "default": True}
+                },
                 "required": ["api_key"]
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_account",
+            "description": "PERMANENTLY delete a connected Threads account from the database.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account_identifier": {"type": "string"},
+                    "account_id": {"type": "string"},
+                    "platform": {"type": "string", "enum": ["threads"], "default": "threads"}
+                }
+            }
+        }
+    }
 ]
 
 
@@ -2457,6 +3012,10 @@ def execute_tool(name, args, session_id=None):
     try:
         if name == 'login':
             return tool_login(args.get('username'), args.get('password'))
+        
+        if name == 'restore_session':
+            return tool_restore_session(args.get('handle'))
+        
         if name == 'fetch_posts':
             if not session_id:
                 return {"success": False, "error": "Login first"}
@@ -2467,27 +3026,94 @@ def execute_tool(name, args, session_id=None):
                 media_only=bool(args.get('media_only', True)),
                 include_reposts=bool(args.get('include_reposts', False))
             )
+        
         if name == 'add_to_vault':
             posts = []
             if session_id and session_id in sessions:
                 posts = sessions[session_id].get('_last_fetched') or []
             return tool_add_to_vault(posts, handler_handle=sessions.get(session_id, {}).get('_last_actor'))
+        
         if name == 'list_vault':
-            return tool_list_vault(limit=int(args.get('limit') or 15))
+            return tool_list_vault(
+                limit=int(args.get('limit') or 15),
+                offset=int(args.get('offset') or 0)
+            )
+        
+        # ===== NEW VAULT MANAGEMENT TOOLS =====
+        if name == 'list_vault_by_status':
+            return tool_list_vault_by_status(
+                status=args.get('status', 'all'),
+                limit=int(args.get('limit', 50)),
+                offset=int(args.get('offset', 0))
+            )
+        
+        if name == 'delete_vault_items':
+            # Require confirmation for "delete all"
+            if args.get('all'):
+                confirm = args.get('confirm')
+                if confirm != 'YES_DELETE_ALL':
+                    return {
+                        "success": False, 
+                        "error": "Confirmation required",
+                        "message": "⚠️ This will permanently delete ALL vault items. Reply with 'YES_DELETE_ALL' to confirm.",
+                        "requires_confirmation": True,
+                        "confirmation_code": "YES_DELETE_ALL"
+                    }
+            return tool_delete_vault_items(
+                ids=args.get('ids'),
+                status=args.get('status'),
+                all=args.get('all', False)
+            )
+        
+        if name == 'post_unposted':
+            return tool_post_unposted(
+                account_username=args.get('account_username'),
+                account_id=args.get('account_id'),
+                limit=int(args.get('limit', 10))
+            )
+        
+        if name == 'remove_from_vault':
+            return tool_remove_from_vault(args.get('uri'))
+        # ===== END NEW VAULT MANAGEMENT TOOLS =====
+        
         if name == 'post_now':
             return tool_post_now(
                 vault_id=args.get('vault_id'),
                 uri=args.get('uri'),
                 caption=args.get('caption'),
                 account_username=args.get('account_username'),
-                account_id=args.get('account_id')
+                account_id=args.get('account_id'),
+                content_type=args.get('content_type', 'feed')
             )
+        
+        if name == 'post_vault_batch':
+            return tool_post_vault_batch(
+                count=args.get('count', 3),
+                account_id=args.get('account_id'),
+                account_username=args.get('account_username'),
+                content_type=args.get('content_type', 'feed')
+            )
+        
+        if name == 'schedule_bulk':
+            return tool_schedule_bulk(
+                count=args.get('count'),
+                period=args.get('period', 'week'),
+                account_id=args.get('account_id'),
+                content_type=args.get('content_type', 'feed')
+            )
+        
         if name == 'list_accounts':
             return tool_list_accounts('threads')
+        
         if name == 'get_status':
             return tool_get_status()
+        
         if name == 'list_scheduled':
             return tool_list_scheduled()
+        
+        if name == 'list_recent_posted':
+            return tool_list_recent_posted(limit=int(args.get('limit', 5)))
+        
         if name == 'auto_setup':
             return tool_auto_setup(
                 name=args.get('name') or 'default',
@@ -2496,41 +3122,344 @@ def execute_tool(name, args, session_id=None):
                 account_id=args.get('account_id'),
                 poll_interval_sec=args.get('poll_interval_sec') or 300,
                 max_posts_per_run=args.get('max_posts_per_run') or 2,
+                media_only=bool(args.get('media_only', True)),
+                bluesky_handle=args.get('bluesky_handle'),
+                bluesky_app_password=args.get('bluesky_app_password')
             )
+        
         if name == 'auto_start':
             return tool_auto_start()
+        
         if name == 'auto_stop':
             return tool_auto_stop()
+        
         if name == 'auto_status':
             return tool_auto_status()
+        
         if name == 'auto_run_now':
             return tool_auto_run_now(args.get('name') or 'default')
+        
+        if name == 'auto_remove':
+            name = args.get('name')
+            if not name:
+                return {"success": False, "error": "No pipeline name specified"}
+            return tool_auto_remove(name)
+        
         if name == 'check_zernio_key':
-            return tool_check_zernio_key(args.get('api_key'))
+            return tool_check_zernio_key(
+                api_key=args.get('api_key'),
+                save_to_db=args.get('save_to_db', True)
+            )
+        
         if name == 'list_api_keys':
             return tool_list_api_keys()
+        
+        if name == 'get_api_key_status':
+            return tool_get_api_key_status(key_index=args.get('key_index'))
+        
+        if name == 'delete_account':
+            return tool_delete_account_permanently(
+                account_identifier=args.get('account_identifier'),
+                account_id=args.get('account_id'),
+                platform=args.get('platform', 'threads')
+            )
+        
+        if name == 'delete_all_accounts':
+            return tool_delete_all_accounts_permanently(
+                platform=args.get('platform'),
+                confirm=args.get('confirm')
+            )
+        
+        if name == 'help':
+            return {
+                "success": True, 
+                "message": """Available commands:
+
+📥 FETCHING:
+  login - Login to Bluesky
+  restore_session - Restore a saved session
+  fetch_posts - Fetch posts from a Bluesky handle
+  add_to_vault - Save fetched posts to vault
+
+📦 VAULT MANAGEMENT:
+  list_vault - List items in the vault
+  list_vault_by_status - List vault items by status (unposted/posted/scheduled/all)
+  delete_vault_items - Permanently delete vault items
+  post_unposted - Post all unposted vault items
+  remove_from_vault - Remove a specific item from vault
+
+📤 POSTING:
+  post_now - Post a vault item to Threads
+  post_vault_batch - Post multiple vault items
+  schedule_bulk - Schedule multiple posts
+
+📊 STATUS:
+  list_accounts - List all connected Threads accounts
+  get_status - Get system status
+  list_scheduled - List scheduled posts
+  list_recent_posted - Show recently posted items
+
+🤖 AUTO PILOT:
+  auto_setup - Configure auto-pilot pipeline
+  auto_start - Start auto-pilot
+  auto_stop - Stop auto-pilot
+  auto_status - Get auto-pilot status
+  auto_run_now - Run auto-pilot once
+  auto_remove - Remove a pipeline
+
+🔑 API KEYS:
+  list_api_keys - List all Zernio API keys
+  check_zernio_key - Validate a Zernio API key
+  get_api_key_status - Check API key status
+
+🗑️ ACCOUNT MANAGEMENT:
+  delete_account - Permanently delete an account
+  delete_all_accounts - Delete all accounts
+
+❓ HELP:
+  help - Show this help message"""
+            }
+        
         return {"success": False, "error": f"Unknown tool {name}"}
     except Exception as e:
         traceback.print_exc()
         return {"success": False, "error": str(e)}
 
 
-SYSTEM_PROMPT = """You are the AI for Bluesky AI Vault → Threads.
+SYSTEM_PROMPT = """You are the AI assistant for Bluesky AI Vault → Threads - a social media automation tool.
 
-RULES:
-- Source platform: Bluesky (login, fetch posts).
-- Destination platform: Threads only (post, schedule, auto-pilot via Zernio).
-- Only talk about Bluesky and Threads. Do not name any other social networks.
-- Connected publishing accounts are Threads accounts only.
+===========================================
+CORE FUNCTIONALITY:
+===========================================
+- Source: Bluesky (fetch posts)
+- Destination: Threads ONLY (via Zernio)
+- Facebook, Instagram, TikTok, Twitter are NOT supported
+- Timezone: Africa/Nairobi
 
-You help the user:
-- Login to Bluesky
-- Fetch posts from Bluesky handles
-- Save them to a vault
-- Post vault items to Threads
-- Auto-pilot: watch a Bluesky account and cross-post new media to Threads
+===========================================
+LOCAL MEMORY FEATURES - I CAN REMEMBER:
+===========================================
+I have a local memory system that learns about you to provide a personalized experience:
 
-Be concise. Timezone for schedules is Africa/Nairobi (GMT+3).
+1. **Preferred Account**: I remember which Threads account you prefer to post to
+2. **Posting Patterns**: I learn from your posting history (frequency, content types)
+3. **Common Topics**: I track what you're interested in
+4. **Conversation History**: I remember recent conversations for context
+5. **Last Used Account**: I remember which account you used most recently
+
+You can ask me:
+- "What do you know about me?" - See what I remember
+- "Forget everything" - Clear my memory
+- "Remember @account_name" - Set a preferred account
+- "What's my preferred account?" - Check your current preference
+
+I will automatically use your preferred account when posting, so you don't have to specify it every time!
+
+===========================================
+CRITICAL - HANDLING TOOL RESPONSES:
+===========================================
+When a tool returns a response, you MUST check for these special flags:
+
+1. **"needs_account": True** - User has multiple Threads accounts
+   → Check if user has a preferred account saved
+   → If YES: "Using your preferred account: @[account]" and post
+   → If NO: "You have [N] accounts: [names]. Which one?"
+   → After user chooses, REMEMBER it!
+
+2. **"requires_confirmation": True** - Action needs user confirmation
+   → You MUST re-prompt the user with the confirmation question
+   → Example: "Reply with YES_DELETE_ALL to confirm"
+
+3. **"confirmation_code": "YES_DELETE_ALL"** - User must reply with exact code
+   → Tell the user: "Reply with YES_DELETE_ALL to confirm"
+
+===========================================
+MULTIPLE ACCOUNTS FLOW WITH MEMORY:
+===========================================
+When the user wants to POST something (post_now, post_unposted, post_vault_batch):
+
+STEP 1: Check if the user specified an account:
+- "post id 5 to mythreadsaccount" → use account_username="mythreadsaccount"
+- "post unposted to My Threads" → use account_username="My Threads"
+
+STEP 2: If NO account was specified:
+- Check if user has a PREFERRED ACCOUNT saved in memory
+- If YES → "Using your preferred account: @[account]" (do NOT ask!)
+- If NO → Call list_accounts() to see how many exist
+  - If ONLY 1 account → use it automatically, mention: "Posting to @[account_name]"
+  - If MULTIPLE accounts → ASK: "You have [N] Threads accounts: [list]. Which one?"
+
+STEP 3: After user chooses, REMEMBER the choice for next time
+
+STEP 4: Wait for the user's response before posting.
+
+===========================================
+VAULT MANAGEMENT COMMANDS:
+===========================================
+- "list unposted" or "show unposted" → list_vault_by_status(status="unposted")
+- "list posted" or "show posted" → list_vault_by_status(status="posted")
+- "list scheduled" or "show scheduled" → list_vault_by_status(status="scheduled")
+- "list all vault" or "show all vault" → list_vault_by_status(status="all")
+- "post unposted" → post_unposted() (uses preferred account if set)
+- "post count 5" → post_unposted(limit=5)
+- "delete unposted" → delete_vault_items(status="unposted") (needs confirmation)
+- "delete posted" → delete_vault_items(status="posted") (needs confirmation)
+- "delete scheduled" → delete_vault_items(status="scheduled") (needs confirmation)
+- "delete all vault" → delete_vault_items(all=True) (⚠️ Requires: YES_DELETE_ALL)
+- "delete vault id 1,2,3" → delete_vault_items(ids=[1,2,3])
+- "post id 5" → post_now(vault_id=5) (uses preferred account if set)
+- "post 3 from vault" → post_vault_batch(count=3) (uses preferred account if set)
+
+When showing vault items, include status icons:
+   ✅ = posted, ⏳ = scheduled, ⬜ = unposted
+
+For posting, always mention which account was used.
+
+===========================================
+ACCOUNT DELETION (PERMANENT - USE WITH CAUTION):
+===========================================
+- "delete account @username permanently" → delete_account(account_identifier="username")
+- "remove forever" / "erase account" / "delete permanently" → delete_account()
+- "delete all accounts permanently" → FIRST confirm, then delete_all_accounts(confirm="YES_DELETE_ALL")
+- ⚠️ PERMANENT means: removes account, vault posts, and posted history. CANNOT BE UNDONE.
+- ALWAYS confirm with the user before deleting.
+- Use list_accounts() first if unclear which account to delete.
+
+===========================================
+API KEYS vs ACCOUNTS (DO NOT CONFUSE):
+===========================================
+- "API keys" / "Zernio keys" / "how many keys" → ALWAYS call list_api_keys()
+  Never answer this with list_accounts. Keys and accounts are different!
+- "Accounts" / "which Threads" / "connected accounts" → call list_accounts()
+- User PASTES a key (sk_...) or says "check this key" → 
+  ALWAYS call check_zernio_key(api_key="sk_...") with the exact key
+
+===========================================
+PLATFORMS:
+===========================================
+- Threads (via Zernio) → destination for posts; accounts from Zernio API keys in environment
+- Bluesky (AT Protocol) → source only: login/fetch posts into vault (NOT a posting target)
+- Default (and only) platform is Threads
+
+===========================================
+REPLY STYLE (CRITICAL):
+===========================================
+- NEVER paste raw JSON, tool dumps, or {"success":...} into your reply
+- ALWAYS summarize tool results in short plain English
+- For list_accounts: say the usernames only, not the full JSON
+- For confirmation: clearly tell the user what to reply
+- For multiple accounts: list them clearly and ask which one
+- For memory: confirm when you remember something (e.g., "✅ I'll remember @account for future posts")
+- Be friendly, concise, and helpful
+- Use emojis sparingly to make responses more readable
+
+===========================================
+EXAMPLE CONVERSATIONS WITH MEMORY:
+===========================================
+User: "post id 5"
+(First time - no preferred account, 2 accounts exist)
+You: "You have 2 Threads accounts: @MyThreads and @AnotherThreads. Which one do you want to post to?"
+
+User: "MyThreads"
+You: "✅ Done — posted to Threads (@MyThreads). 
+I'll remember @MyThreads as your preferred account for future posts."
+
+User: "post id 6"
+(Now has preferred account)
+You: "✅ Done — posted to Threads (@MyThreads) using your preferred account."
+
+User: "what do you know about me?"
+You: "📌 Context about you:
+• User's preferred account: @MyThreads
+• User has posted 3 times this session
+• Last action: post"
+
+User: "forget everything"
+You: "🧹 I've cleared all memories about you. I'll start fresh!"
+
+User: "remember @AnotherThreads"
+You: "✅ I'll remember @AnotherThreads as your preferred account for future posts."
+
+===========================================
+AUTONOMY (pipelines):
+===========================================
+- Each Bluesky source is its own pipeline with a unique name
+- auto_status lists ALL pipelines
+- auto_remove(name="scorpio") permanently deletes that pipeline
+- "Stop auto" / "stop pipeline X" → auto_stop (disables, keeps config)
+- "Remove pipeline X" / "delete pipeline scorpio" → auto_remove (deletes forever)
+
+===========================================
+ADDING A NEW PIPELINE:
+===========================================
+- If user says "add a pipeline" WITHOUT full details → Ask clarifying questions
+- Minimum required: source_handle (Bluesky) + account_username (Threads)
+- Defaults: poll_interval_sec=300, max_posts_per_run=1, content_type=feed, enabled=true
+- As soon as BOTH are known, call auto_setup once
+
+===========================================
+SCHEDULING:
+===========================================
+- schedule_bulk(count=N, period="week", platforms=["threads"])
+- Prefer count to take the latest N posts
+- Always ask which account when multiple accounts exist (unless preferred account is set)
+
+===========================================
+OTHER COMMANDS:
+===========================================
+- "status" → get_status
+- "list accounts" → list_accounts()
+- "login with handle and app-password" → login()
+- "fetch 10 posts from @handle" → fetch_posts()
+- "save them to vault" → add_to_vault()
+- "list scheduled" → list_scheduled()
+- "list recent posted" → list_recent_posted()
+- "help" → Show available commands
+
+===========================================
+MEMORY MANAGEMENT COMMANDS:
+===========================================
+- "what do you know about me" → Shows all saved preferences
+- "forget everything" → Clears all memory
+- "remember @account" → Sets preferred account
+- "what's my preferred account" → Shows current preference
+
+===========================================
+POSTING LIMITATIONS:
+===========================================
+- Threads posts have a maximum of 500 characters
+- Images are supported (up to 10 per post)
+- Video is not supported yet
+- Content type: "feed" is the default (stories are not supported on Threads)
+
+===========================================
+REMEMBER:
+===========================================
+- Timezone is Africa/Nairobi
+- Only Threads posting is supported
+- Always check for preferred account before asking which account
+- Always confirm destructive actions
+- Be concise and helpful
+- Learn from interactions - remember user preferences
+- NEVER invent success - report tool results honestly
+- NEVER paste raw JSON in your reply
+
+===========================================
+YOUR PERSONALITY:
+===========================================
+- You are helpful, friendly, and efficient
+- You remember user preferences to make interactions smoother
+- You proactively suggest actions based on context
+- You explain what you're doing in simple terms
+- You confirm important actions before executing them
+- You learn from every interaction to improve future responses
+
+===========================================
+IMPORTANT - DO NOT MENTION OTHER PLATFORMS:
+===========================================
+- Only talk about Bluesky and Threads
+- Do not mention Instagram, Facebook, TikTok, Twitter, or any other platform
+- If the user asks about other platforms, politely redirect to Threads
 """
 
 
