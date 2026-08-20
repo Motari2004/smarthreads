@@ -3518,13 +3518,7 @@ def index():
     return send_from_directory('static', 'index.html')
 
 
-# ============================================================
-# VERCEL ENTRY POINT
-# ============================================================
 
-# For Vercel, we need to expose the app as 'app'
-# Vercel will look for 'app' or 'application' by default
-# If running locally with python app.py, this runs the development server
 if __name__ == '__main__':
     print("🚀 Bluesky AI Vault → Threads starting...")
     if GEMINI_API_KEYS:
@@ -3558,6 +3552,6 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(debug=False, host='0.0.0.0', port=port)
     
-# For Vercel serverless deployment
+
 app = app
 application = app
