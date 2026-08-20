@@ -3557,7 +3557,7 @@ if __name__ == '__main__':
 
     port = int(os.environ.get('PORT', 10000))
     app.run(debug=False, host='0.0.0.0', port=port)
-
+    
 # For Vercel serverless deployment
-# The app object is what Vercel imports
+app = app
 application = app
