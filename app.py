@@ -2811,7 +2811,6 @@ def execute_tool(name, args, session_id=None):
     try:
         if name == 'login':
             return tool_login(args.get('username'), args.get('password'))
-        
         if name == 'fetch_posts':
             if not session_id:
                 return {"success": False, "error": "Login first"}
@@ -2822,53 +2821,13 @@ def execute_tool(name, args, session_id=None):
                 media_only=bool(args.get('media_only', True)),
                 include_reposts=bool(args.get('include_reposts', False))
             )
-        
         if name == 'add_to_vault':
             posts = []
             if session_id and session_id in sessions:
                 posts = sessions[session_id].get('_last_fetched') or []
             return tool_add_to_vault(posts, handler_handle=sessions.get(session_id, {}).get('_last_actor'))
-        
         if name == 'list_vault':
             return tool_list_vault(limit=int(args.get('limit') or 15))
-        
-        # ===== NEW VAULT MANAGEMENT TOOLS =====
-        if name == 'list_vault_by_status':
-            return tool_list_vault_by_status(
-                status=args.get('status', 'all'),
-                limit=int(args.get('limit', 50))
-            )
-        
-        if name == 'delete_vault_items':
-            # Require confirmation for "delete all"
-            if args.get('all'):
-                confirm = args.get('confirm')
-                if confirm != 'YES_DELETE_ALL':
-                    return {
-                        "success": False, 
-                        "error": "Confirmation required",
-                        "message": "⚠️ This will permanently delete ALL vault items. Reply with 'YES_DELETE_ALL' to confirm."
-                    }
-            return tool_delete_vault_items(
-                ids=args.get('ids'),
-                status=args.get('status'),
-                all=args.get('all', False)
-            )
-        
-        if name == 'post_unposted':
-            return tool_post_unposted(
-                account_username=args.get('account_username'),
-                limit=int(args.get('limit', 10))
-            )
-        
-        if name == 'post_vault_batch':
-            return tool_post_vault_batch(
-                count=args.get('count', 3),
-                account_username=args.get('account_username'),
-                account_id=args.get('account_id')
-            )
-        # ===== END NEW TOOLS =====
-        
         if name == 'post_now':
             return tool_post_now(
                 vault_id=args.get('vault_id'),
@@ -2877,16 +2836,12 @@ def execute_tool(name, args, session_id=None):
                 account_username=args.get('account_username'),
                 account_id=args.get('account_id')
             )
-        
         if name == 'list_accounts':
             return tool_list_accounts('threads')
-        
         if name == 'get_status':
             return tool_get_status()
-        
         if name == 'list_scheduled':
             return tool_list_scheduled()
-        
         if name == 'auto_setup':
             return tool_auto_setup(
                 name=args.get('name') or 'default',
@@ -2896,28 +2851,18 @@ def execute_tool(name, args, session_id=None):
                 poll_interval_sec=args.get('poll_interval_sec') or 300,
                 max_posts_per_run=args.get('max_posts_per_run') or 2,
             )
-        
         if name == 'auto_start':
             return tool_auto_start()
-        
         if name == 'auto_stop':
             return tool_auto_stop()
-        
         if name == 'auto_status':
             return tool_auto_status()
-        
         if name == 'auto_run_now':
             return tool_auto_run_now(args.get('name') or 'default')
-        
-        if name == 'auto_remove':
-            return tool_auto_remove(args.get('name'))
-        
         if name == 'check_zernio_key':
             return tool_check_zernio_key(args.get('api_key'))
-        
         if name == 'list_api_keys':
             return tool_list_api_keys()
-        
         return {"success": False, "error": f"Unknown tool {name}"}
     except Exception as e:
         traceback.print_exc()
@@ -3557,7 +3502,7 @@ if __name__ == '__main__':
 
     port = int(os.environ.get('PORT', 10000))
     app.run(debug=False, host='0.0.0.0', port=port)
-    
+
 # For Vercel serverless deployment
 # The app object is what Vercel imports
 application = app
